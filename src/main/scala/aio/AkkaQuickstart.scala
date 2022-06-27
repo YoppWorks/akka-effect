@@ -1,12 +1,12 @@
 //#full-example
-package com.yoppworks.aio
+package aio
 
 
 import akka.actor.typed.ActorRef
 import akka.actor.typed.ActorSystem
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
-import com.yoppworks.aio.GreeterMain.SayHello
+import aio.GreeterMain.SayHello
 
 //#greeter-actor
 object Greeter {
