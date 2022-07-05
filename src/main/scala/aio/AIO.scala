@@ -2,7 +2,7 @@ package aio
 
 import scala.util.control.NonFatal
 
-sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Byte) {
+sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) {
   import AIO._
   import Effect._
 
@@ -112,16 +112,20 @@ object AIO {
       }
   }
 
+  implicit class AIOSyncOps[A](private val aio: AIO[A, Sync]) extends AnyVal {
+    def runSync: Outcome[A] = runtime.SyncRuntime.runSync(aio)
+  }
+
   /***************/
   /* Algebra Ids */
   /***************/
   private[aio] object Identifiers {
-    final val Value: Byte = 0
-    final val Error: Byte = 1
-    final val Sync: Byte = 2
-    final val Suspend: Byte = 3
-    final val Transform: Byte = 4
-    final val Finalize: Byte = 5
+    final val Value = 0
+    final val Error = 1
+    final val Eval = 2
+    final val Suspend = 3
+    final val Transform = 4
+    final val Finalize = 5
   }
 
   /****************/
@@ -131,7 +135,7 @@ object AIO {
 
   private[aio] final case class Error(error: Throwable) extends AIO[Nothing, Pure](Identifiers.Error)
 
-  private[aio] final case class Eval[+A](expr: () => A) extends AIO[A, Sync](Identifiers.Sync)
+  private[aio] final case class Eval[+A](expr: () => A) extends AIO[A, Sync](Identifiers.Eval)
 
   private[aio] final case class Suspend[+A, E <: Effect](expr: () => AIO[A, E]) extends AIO[A, E](Identifiers.Suspend)
 

@@ -23,6 +23,13 @@ sealed trait Outcome[+A] extends Product with Serializable {
       case Failure(_) => false
       case Aborted    => true
     }
+
+  final def raiseError(error: Throwable): Outcome[A] =
+    this match {
+      case Success(_)   => Outcome.Failure(error)
+      case Aborted      => Outcome.Failure(error)
+      case Failure(err) => err.addSuppressed(error); Outcome.Failure(err)
+    }
 }
 
 object Outcome {
