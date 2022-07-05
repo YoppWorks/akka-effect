@@ -52,19 +52,22 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Byte) {
   final def recover[B >: A](f: Throwable => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
       a => Value(a),
-      err => { try Value(f(err)) catch { case NonFatal(err2) => Error(err2) } }
+      err => { try Value(f(err)) catch { case NonFatal(err2) => Error(err2) } },
+      hasErrHandler = true
     )
 
   final def recoverWith[B >: A, E2 <: Effect](f: Throwable => AIO[B, E2])(implicit go: GreaterOf[E, E2]): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
       a => Value(a),
-      err => { try f(err) catch { case NonFatal(err2) => Error(err2) } }
+      err => { try f(err) catch { case NonFatal(err2) => Error(err2) } },
+      hasErrHandler = true
     )
 
   final def transform[B](onSucc: A => B)(onErr: Throwable => B): AIO[B, E] =
     Transform[A, B, E](this,
       a => { try Value(onSucc(a)) catch { case NonFatal(err) => Error(err) } },
-      err => { try Value(onErr(err)) catch { case NonFatal(err2) => Error(err2) } }
+      err => { try Value(onErr(err)) catch { case NonFatal(err2) => Error(err2) } },
+      hasErrHandler = true
     )
 
   final def transformWith[B, E2 <: Effect, E3 <: Effect](
@@ -74,7 +77,8 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Byte) {
   ): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
       a => { try onSuccK(a) catch { case NonFatal(err) => Error(err) } },
-      err => { try onErrK(err) catch { case NonFatal(err2) => Error(err2) } }
+      err => { try onErrK(err) catch { case NonFatal(err2) => Error(err2) } },
+      hasErrHandler = true
     )
 
 }
@@ -134,7 +138,8 @@ object AIO {
   private[aio] final case class Transform[A, +B, E <: Effect](
     aio: AIO[A, _ <: Effect],
     onSucc: A => AIO[B, _ <: Effect],
-    onErr: Throwable => AIO[B, _ <: Effect]
+    onErr: Throwable => AIO[B, _ <: Effect],
+    hasErrHandler: Boolean = false
   ) extends AIO[B, E](Identifiers.Transform)
 
   private[aio] final case class Finalize[A, E <: Effect](
