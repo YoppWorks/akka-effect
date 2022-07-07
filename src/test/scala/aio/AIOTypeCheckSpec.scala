@@ -1,7 +1,6 @@
 package aio
 
 import org.specs2.mutable.Specification
-import org.specs2.execute._
 import org.specs2.execute.Typecheck._
 
 
@@ -35,6 +34,11 @@ object AIOTypeCheckSpec extends Specification {
         """
       }.isSuccess must beFalse
 
+      typecheck {
+        """
+        mult10.runSync
+        """
+      }.isSuccess must beTrue
     }
 
     "change the effect type when using operators" in {

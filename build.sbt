@@ -4,6 +4,15 @@ version := "0.1.0"
 
 scalaVersion := "2.13.8"
 
+// scalac options
+scalacOptions ++= Seq(
+  "-feature",
+  "-optimise",
+  "-opt:l:inline",
+  "-opt-inline-from:aio.**",
+  "-opt-warnings:at-inline-failed"
+)
+
 lazy val akkaVersion = "2.6.19"
 lazy val specs2Version = "4.16.0"
 

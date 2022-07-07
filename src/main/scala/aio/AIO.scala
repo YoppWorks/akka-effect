@@ -6,44 +6,47 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) {
   import AIO._
   import Effect._
 
+  @inline private final def evalGo[B](go: GreaterOf[_ <: Effect, _ <: Effect])(aio: AIO[B, _]): AIO[B, go.Result] =
+    aio.asInstanceOf[AIO[B, go.Result]]
+
   final def ap[B, E2 <: Effect](af: AIO[A => B, E2])(implicit go: GreaterOf[E, E2]): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
       a => af.map(f => f(a))(go.asInstanceOf[GreaterOf[E2, Sync]]),
       err => Error(err)
     )
 
-  final def as[B](b: => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] = map(_ => b)
+  final def as[B](b: => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] = map(_ => b)(go)
 
-  final def asUnit(implicit go: GreaterOf[E, Sync]): AIO[Unit, go.Result] = map(_ => ())
+  final def asUnit(implicit go: GreaterOf[E, Sync]): AIO[Unit, go.Result] = map(_ => ())(go)
 
   final def finalize[E2 <: Effect](fin: Outcome[A] => AIO[Unit, E2])(implicit go: GreaterOf[E, E2]): AIO[A, go.Result] =
     Finalize(this, fin)
 
   final def flatMap[B, E2 <: Effect](f: A => AIO[B, E2])(implicit go: GreaterOf[E, E2]): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
-      a => { try f(a) catch { case NonFatal(err) => Error(err) } },
+      a => { try evalGo(go)(f(a)) catch { case NonFatal(err) => Error(err) } },
       err => Error(err)
     )
 
   final def map[B](f: A => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
-      a => { try Value(f(a)) catch { case NonFatal(err) => Error(err) } },
+      a => { try evalGo(go)(Value(f(a))) catch { case NonFatal(err) => Error(err) } },
       err => Error(err)
     )
 
   final def onAborted[E2 <: Effect](onAbort: AIO[Unit, E2])(implicit go: GreaterOf[E, E2]): AIO[A, go.Result] =
     Finalize[A, go.Result](this,
       {
-        case Outcome.Failure(err) => AIO.unit
+        case Outcome.Failure(_)   => AIO.unit
         case Outcome.Success(_)   => AIO.unit
-        case Outcome.Aborted      => onAbort
+        case Outcome.Aborted      => evalGo(go)(onAbort)
       }
     )
 
   final def onError[E2 <: Effect](onErrK: Throwable => AIO[Unit, E2])(implicit go: GreaterOf[E, E2]): AIO[A, go.Result] =
     Finalize[A, go.Result](this,
       {
-        case Outcome.Failure(err) => try onErrK(err) catch { case NonFatal(err2) => Error(err2) }
+        case Outcome.Failure(err) => try evalGo(go)(onErrK(err)) catch { case NonFatal(err2) => Error(err2) }
         case Outcome.Success(_)   => AIO.unit
         case Outcome.Aborted      => AIO.unit
       }
@@ -59,12 +62,12 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) {
   final def recoverWith[B >: A, E2 <: Effect](f: Throwable => AIO[B, E2])(implicit go: GreaterOf[E, E2]): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
       a => Value(a),
-      err => { try f(err) catch { case NonFatal(err2) => Error(err2) } },
+      err => { try evalGo(go)(f(err)) catch { case NonFatal(err2) => Error(err2) } },
       hasErrHandler = true
     )
 
-  final def transform[B](onSucc: A => B)(onErr: Throwable => B): AIO[B, E] =
-    Transform[A, B, E](this,
+  final def transform[B](onSucc: A => B)(onErr: Throwable => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] =
+    Transform[A, B, go.Result](this,
       a => { try Value(onSucc(a)) catch { case NonFatal(err) => Error(err) } },
       err => { try Value(onErr(err)) catch { case NonFatal(err2) => Error(err2) } },
       hasErrHandler = true
@@ -76,8 +79,8 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) {
     implicit go: GreatestOf[E, E2, E3]
   ): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
-      a => { try onSuccK(a) catch { case NonFatal(err) => Error(err) } },
-      err => { try onErrK(err) catch { case NonFatal(err2) => Error(err2) } },
+      a => { try onSuccK(a).asInstanceOf[AIO[B, go.Result]] catch { case NonFatal(err) => Error(err) } },
+      err => { try onErrK(err).asInstanceOf[AIO[B, go.Result]] catch { case NonFatal(err2) => Error(err2) } },
       hasErrHandler = true
     )
 

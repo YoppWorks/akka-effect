@@ -29,26 +29,6 @@ object SyncRuntime {
   @inline private final def evalExpr[A, E <: Effect](f: () => AIO[A, E]): AIO[A, E] =
     try f() catch { case NonFatal(error) => AIO.Error(error).asInstanceOf[AIO[A, E]] }
 
-  @inline private final def doFinalize(
-    opStack: ArrayStack[StackOp],
-    finalizers: ArrayStack[Finalizer],
-    result: Outcome[Any]
-  ): Outcome[Any] = {
-    val nextFin = finalizers.pop()
-    if (NotNull(nextFin)) {
-      var res1: Outcome[Any] = result
-      val nextAio =
-        try nextFin(res1)
-        catch { case NonFatal(error) =>
-          res1 = res1.raiseError(error)
-          AIO.Error(error)
-        }
-
-      evaluate(nextAio, opStack, finalizers, res1)
-    }
-    else result
-  }
-
   @tailrec private final def evaluate(
     aio: AIO[Any, _ <: Effect],
     opStack: ArrayStack[StackOp],
@@ -59,16 +39,61 @@ object SyncRuntime {
       case IDs.Value =>
         val curAio = aio.asInstanceOf[Value[Any]]
         val value = curAio.value
-        if (opStack.isEmpty) doFinalize(opStack, finalizers, Outcome.Success(value))
+        if (opStack.isEmpty) {
+          val nextFin = finalizers.pop()
+          val curResult = if (IsNull(result)) Outcome.Success(value) else result
+          if (NotNull(nextFin)) {
+            var res1: Outcome[Any] = curResult
+            val nextAio =
+              try nextFin(res1).asInstanceOf[AIO[Unit, Effect.Sync]]
+              catch { case NonFatal(error) =>
+                res1 = res1.raiseError(error)
+                AIO.Error(error)
+              }
+
+            evaluate(nextAio, opStack, finalizers, res1)
+          }
+          else curResult
+        }
         else evaluate(opStack.pop().onSucc(value), opStack, finalizers, result)
 
       case IDs.Error =>
         val curAio = aio.asInstanceOf[Error]
         val error = curAio.error
-        if (opStack.isEmpty) doFinalize(opStack, finalizers, Outcome.Failure(error))
+        if (opStack.isEmpty) {
+          val nextFin = finalizers.pop()
+          val curResult = if (IsNull(result)) Outcome.Failure(error) else result.raiseError(error)
+          if (NotNull(nextFin)) {
+            var res1: Outcome[Any] = curResult
+            val nextAio =
+              try nextFin(res1).asInstanceOf[AIO[Unit, Effect.Sync]]
+              catch { case NonFatal(error) =>
+                res1 = res1.raiseError(error)
+                AIO.Error(error)
+              }
+
+            evaluate(nextAio, opStack, finalizers, res1)
+          }
+          else curResult
+        }
         else {
           val nextOp = nextErrorHandler(opStack)
-          if (IsNull(nextOp)) doFinalize(opStack, finalizers, Outcome.Failure(error))
+          if (IsNull(nextOp)) {
+            val nextFin = finalizers.pop()
+            val curResult = if (IsNull(result)) Outcome.Failure(error) else result.raiseError(error)
+            if (NotNull(nextFin)) {
+              var res1: Outcome[Any] = curResult
+              val nextAio =
+                try nextFin(res1).asInstanceOf[AIO[Unit, Effect.Sync]]
+                catch { case NonFatal(error) =>
+                  res1 = res1.raiseError(error)
+                  AIO.Error(error)
+                }
+
+              evaluate(nextAio, opStack, finalizers, res1)
+            }
+            else curResult
+          }
           else evaluate(nextOp.onErr(error), opStack, finalizers, result)
         }
 
