@@ -13,7 +13,7 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) ext
   final def ap[B, E2 <: Effect](af: AIO[A => B, E2])(implicit go: GreaterOf[E, E2]): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
       a => af.map(f => f(a))(go.asInstanceOf[GreaterOf[E2, Sync]]),
-      err => Error(err)
+      identityError
     )
 
   final def as[B](b: => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] = map(_ => b)(go)
@@ -24,16 +24,10 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) ext
     Finalize(this, fin)
 
   final def flatMap[B, E2 <: Effect](f: A => AIO[B, E2])(implicit go: GreaterOf[E, E2]): AIO[B, go.Result] =
-    Transform[A, B, go.Result](this,
-      a => { try evalGo(go)(f(a)) catch { case NonFatal(err) => Error(err) } },
-      err => Error(err)
-    )
+    Transform[A, B, go.Result](this, f, identityError)
 
   final def map[B](f: A => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] =
-    Transform[A, B, go.Result](this,
-      a => { try evalGo(go)(Value(f(a))) catch { case NonFatal(err) => Error(err) } },
-      err => Error(err)
-    )
+    Transform[A, B, go.Result](this, a => Value(f(a)), identityError)
 
   final def onAborted[E2 <: Effect](onAbort: AIO[Unit, E2])(implicit go: GreaterOf[E, E2]): AIO[A, go.Result] =
     Finalize[A, go.Result](this,
@@ -54,23 +48,15 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) ext
     )
 
   final def recover[B >: A](f: Throwable => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] =
-    Transform[A, B, go.Result](this,
-      a => Value(a),
-      err => { try Value(f(err)) catch { case NonFatal(err2) => Error(err2) } },
-      hasErrHandler = true
-    )
+    Transform[A, B, go.Result](this, identityValue, err => Value(f(err)), hasErrHandler = true)
 
   final def recoverWith[B >: A, E2 <: Effect](f: Throwable => AIO[B, E2])(implicit go: GreaterOf[E, E2]): AIO[B, go.Result] =
-    Transform[A, B, go.Result](this,
-      a => Value(a),
-      err => { try evalGo(go)(f(err)) catch { case NonFatal(err2) => Error(err2) } },
-      hasErrHandler = true
-    )
+    Transform[A, B, go.Result](this, identityValue, err => f(err), hasErrHandler = true)
 
   final def transform[B](onSucc: A => B)(onErr: Throwable => B)(implicit go: GreaterOf[E, Sync]): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
-      a => { try Value(onSucc(a)) catch { case NonFatal(err) => Error(err) } },
-      err => { try Value(onErr(err)) catch { case NonFatal(err2) => Error(err2) } },
+      a => Value(onSucc(a)),
+      err => Value(onErr(err)),
       hasErrHandler = true
     )
 
@@ -80,8 +66,8 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) ext
     implicit go: GreatestOf[E, E2, E3]
   ): AIO[B, go.Result] =
     Transform[A, B, go.Result](this,
-      a => { try onSuccK(a).asInstanceOf[AIO[B, go.Result]] catch { case NonFatal(err) => Error(err) } },
-      err => { try onErrK(err).asInstanceOf[AIO[B, go.Result]] catch { case NonFatal(err2) => Error(err2) } },
+      a => onSuccK(a).asInstanceOf[AIO[B, go.Result]],
+      err => onErrK(err).asInstanceOf[AIO[B, go.Result]],
       hasErrHandler = true
     )
 
@@ -196,5 +182,11 @@ object AIO {
     aio: AIO[A, _ <: Effect],
     finalizer: Outcome[A] => AIO[Unit, _ <: Effect]
   ) extends AIO[A, E](Identifiers.Finalize)
+
+  /**********************/
+  /* Internal Functions */
+  /**********************/
+  private final def identityError[A](error: Throwable): AIO[A, Pure] = Error(error)
+  private final def identityValue[A](value: A): AIO[A, Pure] = Value(value)
 
 }
