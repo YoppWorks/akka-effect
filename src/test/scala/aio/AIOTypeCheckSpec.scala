@@ -21,6 +21,7 @@ object AIOTypeCheckSpec extends Specification {
     "not be able to extract values from non-pure AIO" in {
       val start = AIO.pure(10)
       val mult10 = start.map(_ * 10)
+      val num10Async = AIO.fromOutcome(Outcome.Aborted).as(10)
 
       typecheck {
         """
@@ -39,6 +40,12 @@ object AIOTypeCheckSpec extends Specification {
         mult10.runSync
         """
       }.isSuccess must beTrue
+
+      typecheck {
+        """
+        num10Async.runSync
+        """
+      }.isSuccess must beFalse
     }
 
     "change the effect type when using operators" in {
@@ -79,6 +86,7 @@ object AIOTypeCheckSpec extends Specification {
       cont.transformWith(_ => ten)(_ => AIO.pure(10)) must beAnInstanceOf[AIO[String, Sync]]
       cont.transformWith(_ => AIO.pure(10))(_ => ten) must beAnInstanceOf[AIO[String, Sync]]
       cont.transformWith(_ => ten)(_ => ten) must beAnInstanceOf[AIO[String, Sync]]
+      cont.transformWith(_ => ten)(_ => AIO.fromOutcome(Outcome.Aborted)) must beAnInstanceOf[AIO[String, Async]]
     }
 
   }

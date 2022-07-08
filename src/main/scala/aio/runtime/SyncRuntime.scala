@@ -13,6 +13,7 @@ object SyncRuntime {
     Error,
     Eval,
     Suspend,
+    Block,
     Transform,
     Finalize
   }
@@ -22,96 +23,80 @@ object SyncRuntime {
 
   final def runSync[A](aio: AIO[A, Effect.Sync]): Outcome[A] = {
     val evalAio: AIO[Any, Effect.Sync] = aio.asInstanceOf[AIO[Any, Effect.Sync]]
-    val result = evaluate(evalAio, ArrayStack[StackOp], ArrayStack[Finalizer], Null[Outcome[Any]])
+    val result = evaluate(evalAio, ArrayStack[StackOp], ArrayStack[Finalizer])
     result.asInstanceOf[Outcome[A]]
   }
 
   @inline private final def evalExpr[A, E <: Effect](f: () => AIO[A, E]): AIO[A, E] =
     try f() catch { case NonFatal(error) => AIO.Error(error).asInstanceOf[AIO[A, E]] }
 
+  @tailrec private final def runFinalizers(finalizers: ArrayStack[Finalizer], result: Outcome[Any]): Outcome[Any] = {
+    val nextFin = finalizers.pop()
+    if (NotNull(nextFin)) {
+      var nextResult: Outcome[Any] = result
+      val nextAio: AIO[Any, _ <: Effect] =
+        try nextFin(nextResult)
+        catch { case NonFatal(error) =>
+          nextResult = nextResult.raiseError(error)
+          AIO.Error(error)
+        }
+      val finalizerResult = evaluate(nextAio, ArrayStack[StackOp], ArrayStack[Finalizer])
+      runFinalizers(finalizers, Outcome.resultOrError(nextResult, finalizerResult))
+    } else result
+  }
+
+  @inline private final def runBlock(
+    aio: AIO[Any, _ <: Effect],
+    finalizers: ArrayStack[Finalizer],
+    opStack: ArrayStack[StackOp]
+  ): Outcome[Any] = {
+    val result = evaluate(aio, ArrayStack[StackOp], ArrayStack[Finalizer])
+    evaluate(AIO.fromOutcome(result), opStack, finalizers)
+  }
+
   @tailrec private final def evaluate(
     aio: AIO[Any, _ <: Effect],
     opStack: ArrayStack[StackOp],
     finalizers: ArrayStack[Finalizer],
-    result: Outcome[Any]
   ): Outcome[Any] =
     (aio.id: @switch) match {
       case IDs.Value =>
         val curAio = aio.asInstanceOf[Value[Any]]
         val value = curAio.value
-        if (opStack.isEmpty) {
-          val nextFin = finalizers.pop()
-          val curResult = if (IsNull(result)) Outcome.Success(value) else result
-          if (NotNull(nextFin)) {
-            var res1: Outcome[Any] = curResult
-            val nextAio =
-              try nextFin(res1).asInstanceOf[AIO[Unit, Effect.Sync]]
-              catch { case NonFatal(error) =>
-                res1 = res1.raiseError(error)
-                AIO.Error(error)
-              }
-
-            evaluate(nextAio, opStack, finalizers, res1)
-          }
-          else curResult
-        }
-        else evaluate(opStack.pop().onSucc(value), opStack, finalizers, result)
+        val curResult = Outcome.Success(value)
+        if (opStack.isEmpty) runFinalizers(finalizers, curResult)
+        else evaluate(opStack.pop().onSucc(value), opStack, finalizers)
 
       case IDs.Error =>
         val curAio = aio.asInstanceOf[Error]
         val error = curAio.error
-        if (opStack.isEmpty) {
-          val nextFin = finalizers.pop()
-          val curResult = if (IsNull(result)) Outcome.Failure(error) else result.raiseError(error)
-          if (NotNull(nextFin)) {
-            var res1: Outcome[Any] = curResult
-            val nextAio =
-              try nextFin(res1).asInstanceOf[AIO[Unit, Effect.Sync]]
-              catch { case NonFatal(error) =>
-                res1 = res1.raiseError(error)
-                AIO.Error(error)
-              }
-
-            evaluate(nextAio, opStack, finalizers, res1)
-          }
-          else curResult
-        }
+        val curResult = Outcome.Failure(error)
+        if (opStack.isEmpty) runFinalizers(finalizers, curResult)
         else {
           val nextOp = nextErrorHandler(opStack)
-          if (IsNull(nextOp)) {
-            val nextFin = finalizers.pop()
-            val curResult = if (IsNull(result)) Outcome.Failure(error) else result.raiseError(error)
-            if (NotNull(nextFin)) {
-              var res1: Outcome[Any] = curResult
-              val nextAio =
-                try nextFin(res1).asInstanceOf[AIO[Unit, Effect.Sync]]
-                catch { case NonFatal(error) =>
-                  res1 = res1.raiseError(error)
-                  AIO.Error(error)
-                }
-
-              evaluate(nextAio, opStack, finalizers, res1)
-            }
-            else curResult
-          }
-          else evaluate(nextOp.onErr(error), opStack, finalizers, result)
+          if (IsNull(nextOp)) runFinalizers(finalizers, curResult)
+          else evaluate(nextOp.onErr(error), opStack, finalizers)
         }
 
       case IDs.Eval =>
         val curAio = aio.asInstanceOf[Eval[Any]]
-        evaluate(evalExpr(() => AIO.Value(curAio.expr())), opStack, finalizers, result)
+        evaluate(evalExpr(() => AIO.Value(curAio.expr())), opStack, finalizers)
 
       case IDs.Suspend =>
         val curAio = aio.asInstanceOf[Suspend[Any, _ <: Effect]]
-        evaluate(evalExpr(curAio.expr), opStack, finalizers, result)
+        evaluate(evalExpr(curAio.expr), opStack, finalizers)
+
+      case IDs.Block =>
+        val curAio = aio.asInstanceOf[Block[Any, _ <: Effect]]
+        runBlock(curAio.aio, finalizers, opStack)
 
       case IDs.Finalize =>
         val curAio = aio.asInstanceOf[Finalize[Any, _ <: Effect]]
-        finalizers.push(curAio.finalizer); evaluate(curAio.aio, opStack, finalizers, result)
+        finalizers.push(curAio.finalizer); evaluate(curAio.aio, opStack, finalizers)
 
       case IDs.Transform =>
         val curAio = aio.asInstanceOf[Transform[Any, Any, _ <: Effect]]
-        opStack.push(curAio); evaluate(curAio.aio, opStack, finalizers, result)
+        opStack.push(curAio); evaluate(curAio.aio, opStack, finalizers)
     }
 
   @inline private final def nextErrorHandler(opStack: ArrayStack[StackOp]): StackOp = {

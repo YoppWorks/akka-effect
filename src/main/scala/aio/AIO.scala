@@ -1,5 +1,6 @@
 package aio
 
+import scala.util.Try
 import scala.util.control.NonFatal
 
 sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) {
@@ -95,6 +96,8 @@ object AIO {
 
   final def apply[A](expr: => A): AIO[A, Sync] = Eval(() => expr)
 
+  final def finallyBlock[A, E <: Effect](aio: AIO[A, E]): AIO[A, E] = Block[A, E](aio)
+
   final def error(error: Throwable): AIO[Nothing, Pure] = Error(error)
 
   final def eval[A](expr: => A): AIO[A, Sync] = Eval(() => expr)
@@ -103,9 +106,39 @@ object AIO {
 
   final def suspend[A, E <: Effect](expr: => AIO[A, E]): AIO[A, E] = Suspend(() => expr)
 
+  final def using[R, A, E1 <: Effect, E2 <: Effect, E3 <: Effect](
+    acquire: AIO[R, E1])(
+    use: R => AIO[A, E2])(
+    release: (R, Outcome[A]) => AIO[Unit, E3])(implicit
+    go: GreatestOf[E1, E2, E3],
+    go2: GreaterOf[E2, E3]
+  ): AIO[A, go.Result] =
+    Block[A, go.Result] {
+      implicit val go3 = go2.asInstanceOf[GreaterOf[E1, go2.Result]]
+      implicit val go4 = go2.asInstanceOf[GreaterOf[E1, GreaterOf[E2, E3]#Result]]
+      acquire.flatMap(resource => use(resource).finalize(oc => release(resource, oc)))
+    }
+
+  final def fromTry[A](`try`: Try[A]): AIO[A, Pure] =
+    `try` match {
+      case scala.util.Success(value) => Value(value)
+      case scala.util.Failure(error) => Error(error)
+    }
+
+  final def fromOutcome[A](outcome: Outcome[A]): AIO[A, outcome.Result] =
+    outcome match {
+      case Outcome.Success(value) => Value(value).asInstanceOf[AIO[A, outcome.Result]]
+      case Outcome.Failure(error) => Error(error).asInstanceOf[AIO[A, outcome.Result]]
+      case Outcome.Aborted        => Error(evaluationAbortedError).asInstanceOf[AIO[A, outcome.Result]]
+    }
+
   /****************/
   /* Implicit ops */
   /****************/
+  import scala.language.implicitConversions
+
+  implicit def upcastEffect[A, E <: Pure](aio: AIO[A, _ >: E]): AIO[A, E] = aio.asInstanceOf[AIO[A, E]]
+
   implicit class AIOPureOps[A](private val aio: AIO[A, Pure]) extends AnyVal {
     def extractValue: Either[Throwable, A] =
       aio match {
@@ -117,6 +150,12 @@ object AIO {
 
   implicit class AIOSyncOps[A](private val aio: AIO[A, Sync]) extends AnyVal {
     def runSync: Outcome[A] = runtime.SyncRuntime.runSync(aio)
+    def attempt: AIO[Outcome[A], Sync] = Eval(() => runtime.SyncRuntime.runSync(aio))
+    def unsafeRunSync: A = runSync match {
+      case Outcome.Success(value) => value
+      case Outcome.Failure(error) => throw error
+      case Outcome.Aborted        => throw evaluationAbortedError
+    }
   }
 
   /***************/
@@ -127,8 +166,9 @@ object AIO {
     final val Error = 1
     final val Eval = 2
     final val Suspend = 3
-    final val Transform = 4
-    final val Finalize = 5
+    final val Block = 4
+    final val Transform = 5
+    final val Finalize = 6
   }
 
   /****************/
@@ -139,6 +179,8 @@ object AIO {
   private[aio] final case class Error(error: Throwable) extends AIO[Nothing, Pure](Identifiers.Error)
 
   private[aio] final case class Eval[+A](expr: () => A) extends AIO[A, Sync](Identifiers.Eval)
+
+  private[aio] final case class Block[+A, E <: Effect](aio: AIO[A, _ <: Effect]) extends AIO[A, E](Identifiers.Block)
 
   private[aio] final case class Suspend[+A, E <: Effect](expr: () => AIO[A, E]) extends AIO[A, E](Identifiers.Suspend)
 

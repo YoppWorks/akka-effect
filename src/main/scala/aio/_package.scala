@@ -14,6 +14,9 @@ package object aio {
     sealed trait Total extends Concurrent
   }
 
+  final class EvaluationAbortedError private[aio]() extends Error("Evaluation of AIO aborted.")
+  private[aio] val evaluationAbortedError: Throwable = new EvaluationAbortedError
+
   // Type not-equals:
   // Taken from Shapeless, from here: https://github.com/milessabin/shapeless/blob/main/core/src/main/scala/shapeless/package.scala
   // All credit goes to Miles Saben and other authors
