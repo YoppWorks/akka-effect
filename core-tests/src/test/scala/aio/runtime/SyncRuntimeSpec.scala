@@ -75,7 +75,7 @@ object SyncRuntimeSpec extends Specification {
       val toggle1 = new AtomicBoolean(false)
       val toggle2 = new AtomicBoolean(false)
       val error = new ArithmeticException()
-      def badDivide(d: Double): Double = throw error
+      def badDivide(d: Double): Double = { val _temp = d; throw error }
 
       val expr = AIO(1.0).map(badDivide).finalize(_ => AIO(toggle1.set(true))).finalize(_ => AIO(toggle2.set(true)))
       expr.runSync must_=== Outcome.Failure(error)
@@ -90,13 +90,13 @@ object SyncRuntimeSpec extends Specification {
       val toggle3 = new AtomicBoolean(false)
       val captureError = new AtomicReference[Throwable](Null[Throwable])
       val error = new ArithmeticException()
-      def badDivide(d: Double): Double = throw error
+      def badDivide(d: Double): Double = { val _temp = d; throw error }
       def badFinalizer[A](toggle: AtomicBoolean)(outcome: Outcome[A]): AIO[Unit, Effect.Sync] = {
         toggle.set(true)
         outcome match {
           case Outcome.Success(_) => AIO.unit
           case Outcome.Failure(e) => throw e
-          case Outcome.Aborted    => throw evaluationAbortedError
+          case Outcome.Interrupted    => throw evaluationInterruptedError
         }
       }
 

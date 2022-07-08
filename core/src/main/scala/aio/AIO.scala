@@ -3,7 +3,7 @@ package aio
 import scala.util.Try
 import scala.util.control.NonFatal
 
-sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) {
+sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) extends Serializable {
   import AIO._
   import Effect._
 
@@ -40,7 +40,7 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) {
       {
         case Outcome.Failure(_)   => AIO.unit
         case Outcome.Success(_)   => AIO.unit
-        case Outcome.Aborted      => evalGo(go)(onAbort)
+        case Outcome.Interrupted  => evalGo(go)(onAbort)
       }
     )
 
@@ -49,7 +49,7 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) {
       {
         case Outcome.Failure(err) => try evalGo(go)(onErrK(err)) catch { case NonFatal(err2) => Error(err2) }
         case Outcome.Success(_)   => AIO.unit
-        case Outcome.Aborted      => AIO.unit
+        case Outcome.Interrupted  => AIO.unit
       }
     )
 
@@ -115,7 +115,6 @@ object AIO {
   ): AIO[A, go.Result] =
     Block[A, go.Result] {
       implicit val go3 = go2.asInstanceOf[GreaterOf[E1, go2.Result]]
-      implicit val go4 = go2.asInstanceOf[GreaterOf[E1, GreaterOf[E2, E3]#Result]]
       acquire.flatMap(resource => use(resource).finalize(oc => release(resource, oc)))
     }
 
@@ -129,7 +128,7 @@ object AIO {
     outcome match {
       case Outcome.Success(value) => Value(value).asInstanceOf[AIO[A, outcome.Result]]
       case Outcome.Failure(error) => Error(error).asInstanceOf[AIO[A, outcome.Result]]
-      case Outcome.Aborted        => Error(evaluationAbortedError).asInstanceOf[AIO[A, outcome.Result]]
+      case Outcome.Interrupted    => Error(evaluationInterruptedError).asInstanceOf[AIO[A, outcome.Result]]
     }
 
   /****************/
@@ -150,11 +149,13 @@ object AIO {
 
   implicit class AIOSyncOps[A](private val aio: AIO[A, Sync]) extends AnyVal {
     def runSync: Outcome[A] = runtime.SyncRuntime.runSync(aio)
+
     def attempt: AIO[Outcome[A], Sync] = Eval(() => runtime.SyncRuntime.runSync(aio))
+
     def unsafeRunSync: A = runSync match {
       case Outcome.Success(value) => value
       case Outcome.Failure(error) => throw error
-      case Outcome.Aborted        => throw evaluationAbortedError
+      case Outcome.Interrupted    => throw evaluationInterruptedError
     }
   }
 
