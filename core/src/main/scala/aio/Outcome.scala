@@ -4,7 +4,14 @@ sealed trait Outcome[+A] extends Product with Serializable {
   import Outcome._
 
   type Result <: Effect
-  
+
+  private[aio] final def unsafeUnwrap: A =
+    this match {
+      case Success(value) => value
+      case Failure(error) => throw error
+      case Interrupted    => throw evaluationInterruptedError
+    }
+
   final def isSuccess: Boolean =
     this match {
       case Success(_)  => true
@@ -44,5 +51,20 @@ object Outcome {
 
   @inline private[aio] def resultOrError[A](result: Outcome[A], orError: Outcome[A]) =
     if (orError.isFailure || orError.isInterrupted) orError else result
+
+  private[aio] final def combineLeft[A](lhs: Outcome[A], rhs: Outcome[A]): Outcome[A] = {
+    import internal._
+
+    if (IsNull(lhs)) rhs
+    else if (IsNull(rhs)) lhs
+    else if (lhs.isFailure && rhs.isFailure) {
+      val rhsError = rhs.asInstanceOf[Outcome.Failure[A]].error
+      lhs.raiseError(rhsError)
+    }
+    else if (rhs.isFailure) rhs
+    else if (lhs.isInterrupted) lhs
+    else if (rhs.isInterrupted) rhs
+    else lhs
+  }
 
 }
