@@ -1,8 +1,9 @@
 package aio
 
+import aio.internal.{Deferred, OneShotLatch}
 import aio.runtime.AkkaRuntime
 
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.Try
 import scala.util.control.NonFatal
 import java.util.concurrent.CompletableFuture
@@ -179,6 +180,13 @@ object AIO {
       case Outcome.Interrupted    => cancel.asInstanceOf[AIO[A, outcome.Result]]
     }
 
+  private[aio] final def fromOutcomePure[A](outcome: Outcome[A]): AIO[A, Pure] =
+    outcome match {
+      case Outcome.Success(value) => Value(value)
+      case Outcome.Failure(error) => Error(error)
+      case Outcome.Interrupted    => Error(evaluationInterruptedError)
+    }
+
   final def fromTry[A](`try`: Try[A]): AIO[A, Pure] =
     `try` match {
       case scala.util.Success(value) => Value(value)
@@ -204,7 +212,20 @@ object AIO {
   implicit class AIOSyncOps[A](private val aio: AIO[A, Sync]) extends AnyVal {
     def runSync: Outcome[A] = runtime.SyncRuntime.runSync(aio)
 
-    def attempt: AIO[Outcome[A], Sync] = Eval(() => runtime.SyncRuntime.runSync(aio))
+    def toOutcome: AIO[Outcome[A], Sync] = Eval(() => runtime.SyncRuntime.runSync(aio))
+
+    def memoized: AIO[A, Sync] = {
+      val deferred = Deferred[Outcome[A]]
+      val materialize = toOutcome map { outcome =>
+        deferred.complete(outcome)
+        outcome
+      }
+
+      AIO.suspend {
+        if (deferred.isComplete) fromOutcomePure(deferred.value)
+        else                     materialize flatMap fromOutcomePure
+      }
+    }
 
     def unsafeRunSync: A = runSync match {
       case Outcome.Success(value) => value
@@ -219,12 +240,41 @@ object AIO {
       AkkaRuntime.runAsync(aio, callback)
   }
 
-  implicit class AIOAsyncOps[A](private val aio: AIO[A, _ <: Async]) extends AnyVal {
+  implicit class AIOAsyncOps[A, E <: Async](private val aio: AIO[A, E]) extends AnyVal {
     def unsafeRunBlocking(implicit as: akka.actor.ActorSystem): Outcome[A] =
       AkkaRuntime.runBlocking(aio)
 
     def unsafeRunAsync(callback: Outcome[A] => Unit)(implicit as: akka.actor.ActorSystem): Unit =
       AkkaRuntime.runAsync(aio, callback)
+
+    def toOutcome(implicit as: akka.actor.ActorSystem): AIO[Outcome[A], E] =
+      Suspend { () =>
+        val deferred = Deferred[Outcome[A]]
+        AkkaRuntime.runAsync(aio, deferred.complete)
+        Eval(() => deferred.value)
+      }
+
+    def unsafeToFuture(implicit as: akka.actor.ActorSystem): Future[A] = {
+      val promise = Promise[Outcome[A]]()
+      AkkaRuntime.runAsync(aio, promise.success)
+      promise.future.map(_.unsafeUnwrap)(as.dispatcher)
+    }
+
+    def memoized(implicit as: akka.actor.ActorSystem): AIO[A, Async] = {
+      val deferred = Deferred[Outcome[A]]
+      val runningLatch = OneShotLatch()
+      val materialize = AIO.async[A, Async] { (cb, _) =>
+        if (runningLatch.set())
+          AkkaRuntime.runAsync(aio, deferred.complete)
+
+        cb(deferred.value)
+      }
+
+      AIO.suspend {
+        if (deferred.isComplete) fromOutcomePure(deferred.value)
+        else materialize
+      }
+    }
   }
 
   /***************/
