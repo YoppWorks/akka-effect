@@ -246,6 +246,9 @@ object AIO {
 
     def unsafeRunAsync(callback: Outcome[A] => Unit)(implicit as: akka.actor.ActorSystem): Unit =
       AkkaRuntime.runAsync(aio, callback)
+    
+    def unsafeRunCancellable(callback: Outcome[A] => Unit)(implicit as: akka.actor.ActorSystem): Cancellable =
+      AkkaRuntime.runCancellable(aio, callback)
 
     def toOutcome(implicit as: akka.actor.ActorSystem): AIO[Outcome[A], E] =
       Suspend { () =>
