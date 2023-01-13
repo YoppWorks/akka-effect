@@ -24,6 +24,8 @@ package object aio {
     private final val instance: Aux[Nothing, Nothing, Nothing] =
       new GreaterOf[Nothing, Nothing] { type Result = Nothing }
 
+    private[aio] def make[A <: Effect, B <: Effect]: GreaterOf[A, B] = instance.asInstanceOf[GreaterOf[A, B]]
+
     implicit def atLeastSync: Aux[Pure, Pure, Sync] = instance.asInstanceOf[Aux[Pure, Pure, Sync]]
 
     implicit def allSame[A <: Sync]: Aux[A, A, A] = instance.asInstanceOf[Aux[A, A, A]]

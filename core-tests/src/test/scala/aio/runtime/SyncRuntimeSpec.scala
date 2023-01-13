@@ -112,7 +112,7 @@ object SyncRuntimeSpec extends Specification {
         .recoverWith(e => AIO.error(e))
         .finalize(badFinalizer(toggle3))
 
-      expr.attempt.unsafeRunSync must_=== Outcome.Failure(error)
+      expr.toOutcome.unsafeRunSync must_=== Outcome.Failure(error)
       toggle1.get() must_== true
       toggle2.get() must_== true
       toggle3.get() must_== true

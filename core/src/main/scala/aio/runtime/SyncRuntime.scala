@@ -19,9 +19,6 @@ object SyncRuntime {
   }
   import Constants._
 
-  private type StackOp   = Transform[Any, Any, _ <: Effect]
-  private type Finalizer = Outcome[Any] => AIO[Unit, _ <: Effect]
-
   final def runSync[A](aio: AIO[A, Effect.Sync]): Outcome[A] = {
     val evalAio: AIO[Any, Effect.Sync] = aio.asInstanceOf[AIO[Any, Effect.Sync]]
     val result = evaluate(evalAio, ArrayStack[StackOp], ArrayStack[Finalizer], 0)
@@ -40,7 +37,7 @@ object SyncRuntime {
         return Outcome.Failure(Errors.finalizerRecursionDepthExceeded)
 
       var nextResult: Outcome[Any] = result
-      val nextAio: AIO[Any, _ <: Effect] =
+      val nextAio: AIOAny =
         try nextFin(nextResult)
         catch {
           case NonFatal(error) =>
@@ -52,10 +49,7 @@ object SyncRuntime {
     } else result
   }
 
-  @inline private final def runBlock(
-    blockAio: AIO[Any, _ <: Effect],
-    recursionDepth: Int
-  ): AIO[Any, _ <: Effect] = {
+  @inline private final def runBlock(blockAio: AIOAny, recursionDepth: Int): AIOAny = {
     val result = evaluate(blockAio, ArrayStack[StackOp], ArrayStack[Finalizer], recursionDepth + 1)
     AIO.fromOutcome(result)
   }
@@ -71,12 +65,12 @@ object SyncRuntime {
   }
 
   private final def evaluate(
-    toEval: AIO[Any, _ <: Effect],
+    toEval: AIOAny,
     opStack: ArrayStack[StackOp],
     finalizers: ArrayStack[Finalizer],
     finalizerDepth: Int
   ): Outcome[Any] = {
-    var aio: AIO[Any, _ <: Effect] = toEval
+    var aio: AIOAny = toEval
     var result: Outcome[Any] = Null[Outcome[Any]]
 
     // Check finalizer recursion depth

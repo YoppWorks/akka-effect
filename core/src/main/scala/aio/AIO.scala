@@ -1,7 +1,12 @@
 package aio
 
+import aio.internal.{Deferred, OneShotLatch}
+import aio.runtime.AkkaRuntime
+
+import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.Try
 import scala.util.control.NonFatal
+import java.util.concurrent.CompletableFuture
 
 sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) extends Serializable {
   import AIO._
@@ -75,18 +80,41 @@ sealed abstract class AIO[+A, E <: Effect] private(private[aio] val id: Int) ext
 
 object AIO {
   import Effect._
+  import runtime.Errors
 
-  private final def impossible: Nothing = sys.error("Impossible operation")
+  private final val _never = async[Nothing, Async]((_, _) => ())
+  private final val _unit: AIO[Unit, Pure] = Value(())
 
-  final val unit: AIO[Unit, Pure] = Value(())
+  final val unit: AIO[Unit, Pure] = _unit
+  final val cancel: AIO[Nothing, Async] = CancelEval
+
+  final def never: AIO[Nothing, Async] = _never
+  final def yieldEval: AIO[Unit, Async] = YieldEval
 
   final def apply[A](expr: => A): AIO[A, Sync] = Eval(() => expr)
+
+  final def asyncCancellation[A, E <: Effect](
+    cont: (Outcome[A] => Unit, Cancellable) => AIO[Unit, E])(implicit
+    go: GreaterOf[E, Async]
+  ): AIO[A, go.Result] = AsyncCont[A, go.Result](cont)
+
+  final def async[A, E <: Effect](
+    cont: (Outcome[A] => Unit, Cancellable) => Unit)(implicit
+    go: GreaterOf[E, Async]
+  ): AIO[A, go.Result] = AsyncCont[A, go.Result](
+    (cb, cancellable) => {
+      cont(cb, cancellable)
+      AIO.unit
+    }
+  )
 
   final def finallyBlock[A, E <: Effect](aio: AIO[A, E]): AIO[A, E] = Block[A, E](aio)
 
   final def error(error: Throwable): AIO[Nothing, Pure] = Error(error)
 
   final def eval[A](expr: => A): AIO[A, Sync] = Eval(() => expr)
+
+  final def executionContext: AIO[ExecutionContext, Async] = CurrentContext
 
   final def pure[A](value: A): AIO[A, Pure] = Value(value)
 
@@ -100,8 +128,63 @@ object AIO {
     go2: GreaterOf[E2, E3]
   ): AIO[A, go.Result] =
     Block[A, go.Result] {
-      implicit val go3 = go2.asInstanceOf[GreaterOf[E1, go2.Result]]
-      acquire.flatMap(resource => use(resource).finalize(oc => release(resource, oc)))
+      acquire.flatMap(resource => use(resource).finalize(oc => release(resource, oc)))(GreaterOf.make)
+    }
+
+  final def fromEither[A](either: Either[Throwable, A]): AIO[A, Pure] =
+    either match {
+      case Right(value) => Value(value)
+      case Left(error)  => Error(error)
+    }
+
+  final def fromFuture[A, E <: Effect](
+    futureAio: AIO[Future[A], E])(implicit
+    go: GreaterOf[E, Async]
+  ): AIO[A, go.Result] = {
+    futureAio.flatMap { future =>
+      executionContext.flatMap { implicit ec =>
+        AsyncCont[A, go.Result] { (cb, _) =>
+          future.onComplete {
+            case scala.util.Success(value) => cb(Outcome.Success(value))
+            case scala.util.Failure(error) => cb(Outcome.Failure(error))
+          }
+          AIO.unit
+        }
+      }(GreaterOf.make).asInstanceOf[AIO[A, go.Result]]
+    }(GreaterOf.make).asInstanceOf[AIO[A, go.Result]]
+  }
+
+  final def fromFutureCompletable[A, E <: Effect](
+    futureAio: AIO[CompletableFuture[A], E])(implicit
+    go: GreaterOf[E, Async]
+  ): AIO[A, go.Result] = {
+    import scala.jdk.FutureConverters._
+    futureAio.flatMap { completableFuture =>
+      val future = completableFuture.asScala
+      executionContext.flatMap { implicit ec =>
+        AsyncCont[A, go.Result] { (cb, _) =>
+          future.onComplete {
+            case scala.util.Success(value) => cb(Outcome.Success(value))
+            case scala.util.Failure(error) => cb(Outcome.Failure(error))
+          }
+          AIO(completableFuture.cancel(true)).asUnit
+        }
+      }(GreaterOf.make).asInstanceOf[AIO[A, go.Result]]
+    }(GreaterOf.make).asInstanceOf[AIO[A, go.Result]]
+  }
+
+  final def fromOutcome[A](outcome: Outcome[A]): AIO[A, outcome.Result] =
+    outcome match {
+      case Outcome.Success(value) => Value(value).asInstanceOf[AIO[A, outcome.Result]]
+      case Outcome.Failure(error) => Error(error).asInstanceOf[AIO[A, outcome.Result]]
+      case Outcome.Interrupted    => cancel.asInstanceOf[AIO[A, outcome.Result]]
+    }
+
+  private[aio] final def fromOutcomePure[A](outcome: Outcome[A]): AIO[A, Pure] =
+    outcome match {
+      case Outcome.Success(value) => Value(value)
+      case Outcome.Failure(error) => Error(error)
+      case Outcome.Interrupted    => Error(evaluationInterruptedError)
     }
 
   final def fromTry[A](`try`: Try[A]): AIO[A, Pure] =
@@ -110,38 +193,90 @@ object AIO {
       case scala.util.Failure(error) => Error(error)
     }
 
-  final def fromOutcome[A](outcome: Outcome[A]): AIO[A, outcome.Result] =
-    outcome match {
-      case Outcome.Success(value) => Value(value).asInstanceOf[AIO[A, outcome.Result]]
-      case Outcome.Failure(error) => Error(error).asInstanceOf[AIO[A, outcome.Result]]
-      case Outcome.Interrupted    => Error(evaluationInterruptedError).asInstanceOf[AIO[A, outcome.Result]]
-    }
-
   /****************/
   /* Implicit ops */
   /****************/
   import scala.language.implicitConversions
 
-  implicit def upcastEffect[A, E <: Pure](aio: AIO[A, _ >: E]): AIO[A, E] = aio.asInstanceOf[AIO[A, E]]
+  implicit def upcastEffect[A, E <: Sync](aio: AIO[A, _ >: E]): AIO[A, E] = aio.asInstanceOf[AIO[A, E]]
 
   implicit class AIOPureOps[A](private val aio: AIO[A, Pure]) extends AnyVal {
     def extractValue: Either[Throwable, A] =
       aio match {
         case Value(value) => Right(value)
         case Error(error) => Left(error)
-        case _            => impossible
+        case _            => throw Errors.runtimeError("Tried to extract a non-pure AIO.")
       }
   }
 
   implicit class AIOSyncOps[A](private val aio: AIO[A, Sync]) extends AnyVal {
     def runSync: Outcome[A] = runtime.SyncRuntime.runSync(aio)
 
-    def attempt: AIO[Outcome[A], Sync] = Eval(() => runtime.SyncRuntime.runSync(aio))
+    def toOutcome: AIO[Outcome[A], Sync] = Eval(() => runtime.SyncRuntime.runSync(aio))
+
+    def memoized: AIO[A, Sync] = {
+      val deferred = Deferred[Outcome[A]]
+      val materialize = toOutcome map { outcome =>
+        deferred.complete(outcome)
+        outcome
+      }
+
+      AIO.suspend {
+        if (deferred.isComplete) fromOutcomePure(deferred.value)
+        else                     materialize flatMap fromOutcomePure
+      }
+    }
 
     def unsafeRunSync: A = runSync match {
       case Outcome.Success(value) => value
       case Outcome.Failure(error) => throw error
       case Outcome.Interrupted    => throw evaluationInterruptedError
+    }
+
+    def unsafeRunBlocking(implicit as: akka.actor.ActorSystem): Outcome[A] =
+      AkkaRuntime.runBlocking(aio)
+
+    def unsafeRunAsync(callback: Outcome[A] => Unit)(implicit as: akka.actor.ActorSystem): Unit =
+      AkkaRuntime.runAsync(aio, callback)
+  }
+
+  implicit class AIOAsyncOps[A, E <: Async](private val aio: AIO[A, E]) extends AnyVal {
+    def unsafeRunBlocking(implicit as: akka.actor.ActorSystem): Outcome[A] =
+      AkkaRuntime.runBlocking(aio)
+
+    def unsafeRunAsync(callback: Outcome[A] => Unit)(implicit as: akka.actor.ActorSystem): Unit =
+      AkkaRuntime.runAsync(aio, callback)
+    
+    def unsafeRunCancellable(callback: Outcome[A] => Unit)(implicit as: akka.actor.ActorSystem): Cancellable =
+      AkkaRuntime.runCancellable(aio, callback)
+
+    def toOutcome(implicit as: akka.actor.ActorSystem): AIO[Outcome[A], E] =
+      Suspend { () =>
+        val deferred = Deferred[Outcome[A]]
+        AkkaRuntime.runAsync(aio, deferred.complete)
+        Eval(() => deferred.value)
+      }
+
+    def unsafeToFuture(implicit as: akka.actor.ActorSystem): Future[A] = {
+      val promise = Promise[Outcome[A]]()
+      AkkaRuntime.runAsync(aio, promise.success)
+      promise.future.map(_.unsafeUnwrap)(as.dispatcher)
+    }
+
+    def memoized(implicit as: akka.actor.ActorSystem): AIO[A, Async] = {
+      val deferred = Deferred[Outcome[A]]
+      val runningLatch = OneShotLatch()
+      val materialize = AIO.async[A, Async] { (cb, _) =>
+        if (runningLatch.set())
+          AkkaRuntime.runAsync(aio, deferred.complete)
+
+        cb(deferred.value)
+      }
+
+      AIO.suspend {
+        if (deferred.isComplete) fromOutcomePure(deferred.value)
+        else materialize
+      }
     }
   }
 
@@ -151,11 +286,17 @@ object AIO {
   private[aio] object Identifiers {
     final val Value = 0
     final val Error = 1
+
     final val Eval = 2
     final val Suspend = 3
     final val Block = 4
     final val Transform = 5
     final val Finalize = 6
+
+    final val CurrentContext = 7
+    final val AsyncCont = 8
+    final val YieldEval = 9
+    final val CancelEval = 10
   }
 
   /****************/
@@ -182,6 +323,16 @@ object AIO {
     aio: AIO[A, _ <: Effect],
     finalizer: Outcome[A] => AIO[Unit, _ <: Effect]
   ) extends AIO[A, E](Identifiers.Finalize)
+
+  private[aio] final case class AsyncCont[A, E <: Effect](
+    cont: (Outcome[A] => Unit, Cancellable) => AIO[Unit, _ <: Effect]
+  ) extends AIO[A, E](Identifiers.AsyncCont)
+
+  private[aio] case object CurrentContext extends AIO[ExecutionContext, Async](Identifiers.CurrentContext)
+
+  private[aio] case object YieldEval extends AIO[Unit, Async](Identifiers.YieldEval)
+
+  private[aio] case object CancelEval extends AIO[Nothing, Async](Identifiers.CancelEval)
 
   /**********************/
   /* Internal Functions */
