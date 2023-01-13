@@ -34,13 +34,39 @@ object AkkaRuntime {
   private type RuntimeBehavior  = Behavior[RuntimeCommand]
   private type RuntimeActorRef  = ActorRef[RuntimeCommand]
 
+  final def runCancellable[A](
+    aio: AIO[A, _ <: Effect.Async], callback: Outcome[A] => Unit)(implicit
+    actorSystem: ClassicActorSystem
+  ): Cancellable = {
+    import scaladsl.adapter._
+
+    val id = java.util.UUID.randomUUID()
+    val cancellableDeferred = Deferred[Cancellable]()
+
+    val runtimeBehavior = Behaviors.setup[RuntimeCommand] { context =>
+      val cancellable = new AkkaCancellable(context.self)(context.system.scheduler, Constants.askTimeoutDuration)
+      cancellableDeferred.set(cancellable)
+      new AkkaRuntime(context, cancellable) 
+    }
+
+    val runtime = actorSystem.spawn(runtimeBehavior, s"AIOActor-${id.toString}")
+    runtime ! RunAIO(aio, callback)
+
+    cancellableDeferred.value
+  }
+
   final def runAsync[A](
     aio: AIO[A, _ <: Effect.Async], callback: Outcome[A] => Unit)(implicit
     actorSystem: ClassicActorSystem
   ): Unit = {
     import scaladsl.adapter._
+
     val id = java.util.UUID.randomUUID()
-    val runtimeBehavior = Behaviors.setup[RuntimeCommand](context => new AkkaRuntime(context))
+    val runtimeBehavior = Behaviors.setup[RuntimeCommand] { context =>
+      val cancellable = new AkkaCancellable(context.self)(context.system.scheduler, Constants.askTimeoutDuration)
+      new AkkaRuntime(context, cancellable) 
+    }
+
     val runtime = actorSystem.spawn(runtimeBehavior, s"AIOActor-${id.toString}")
     runtime ! RunAIO(aio, callback)
   }
@@ -52,8 +78,6 @@ object AkkaRuntime {
       Await.result(promise.future, scala.concurrent.duration.Duration.Inf)
     }
   }
-
-  private implicit val timeout: Timeout = Constants.askTimeoutDuration
 
   private def onCompleteCallback(cb: Outcome[Nothing] => Unit, shutdownBehavior: RuntimeBehavior): AsyncCallback =
     new AsyncCallback {
@@ -115,14 +139,13 @@ object AkkaRuntime {
 
 }
 
-private final class AkkaRuntime(context: ActorContext[RuntimeCommand]) extends AbstractBehavior[RuntimeCommand](context) {
+private final class AkkaRuntime(context: ActorContext[RuntimeCommand], cancellable: AkkaCancellable) extends AbstractBehavior[RuntimeCommand](context) {
   import AkkaRuntime._
 
   /* Constants */
   private[this] val self = context.self
   private[this] val maxLoopCount = Constants.autoYieldLimit
   private[this] val executionContext = context.executionContext
-  private[this] val cancellable = new AkkaCancellable(self)(context.system.scheduler, timeout)
   private[this] val akkaCallback = new AkkaCallback(self)
   private lazy val log = context.log
 
